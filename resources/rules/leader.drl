@@ -1,0 +1,146 @@
+//created on: Apr 11, 2016
+package com.massisframework.massis.dasi.apps.robots.leader
+
+//std imports
+import java.util.*;
+import java.util.concurrent.*;
+import com.massisframework.massis.dasi.lowlevel.LowLevelInfo;
+import com.massisframework.massis.dasi.agents.tasks.AgentTask;
+import com.massisframework.massis.dasi.agents.tasks.SimpleTasksFactory;
+import com.massisframework.massis.dasi.events.messages.MessageReceived;
+import com.massisframework.massis.dasi.agents.goals.*;
+import com.massisframework.massis.dasi.agents.goals.AgentGoal.GoalState;
+//robots
+import com.massisframework.massis.dasi.apps.robots.*;
+import com.massisframework.massis.dasi.apps.robots.messages.*;
+import com.massisframework.massis.dasi.apps.robots.messages.teamnegotiation.*;
+//leader
+import com.massisframework.massis.dasi.apps.robots.leader.*;
+import com.massisframework.massis.dasi.apps.robots.leader.info.*;
+import com.massisframework.massis.dasi.apps.robots.leader.tasks.*;
+import com.massisframework.massis.dasi.apps.robots.subordinate.SubordinateRobot;
+//declare any global variables here
+
+//=============================================================================
+// Goal selection
+//-----------------------------------------------------------------------------
+rule "Generate Goal Memory"
+	
+	when
+		not GoalMemory(  )
+ 	then
+  		insert(new GoalMemory());
+end
+
+rule "Add know my team goal if not present"
+	
+	when
+		$gm : GoalMemory( $goals : goals , containsGoalByClass(KnowMyTeam.class)==false)
+ 	then
+ 		KnowMyTeam kmt = new KnowMyTeam();
+ 		insert(kmt);
+  	    $gm.addGoal(kmt);
+end
+
+//=============================================================================
+// Team negotiation rules
+//-----------------------------------------------------------------------------
+// Goal Trigger
+rule "If I dont know my team : The current goal changes."
+	
+	when
+		$me  : LeaderRobot()
+		$gm  : GoalMemory()
+		$kmt : KnowMyTeam ( goalState  == GoalState.PENDING ) from $gm.goals
+ 	then
+ 	   String uuid=UUID.randomUUID().toString();
+ 	   modify($kmt){ setGoalState( GoalState.SOLVING ) }
+ 	   SimpleTasksFactory.sendMessage($me,new JoinTeamRequest(uuid));
+end
+
+rule "Solve the team negotiation"
+	when
+		$me		: LeaderRobot()
+		$gm     : GoalMemory()
+		$kmt    : KnowMyTeam ( goalState  == GoalState.SOLVING ) from $gm.goals 
+		$mr		: MessageReceived(
+							data instanceof JoinTeamResponse,
+							sender instanceof RobotAgent,
+							$sender  : sender,
+							$info : data.info,
+ 							$uuid : data.uuid
+     						) from entry-point MESSAGING
+ 	then
+ 	  SimpleTasksFactory.sendMessage($me,new YouArePartOfMyTeam("1",$uuid));
+ 	  modify( $kmt ) { setGoalState ( GoalState.SOLVED) }
+ 	  modify($me){ addTeamMember((RobotAgent)$sender)}
+ 	  delete($mr);
+end
+
+//==================================================================================
+// Victim saving
+//----------------------------------------------------------------------------------
+
+
+
+rule "Receive I have no energy message"
+    when
+       $me	: LeaderRobot()
+       $mr		: MessageReceived(
+							data instanceof IHaveNoEnergy,
+							sender instanceof RobotAgent,
+							$sender  : sender,
+							$location : data.info,
+							$uuid : data.uuid
+     						) from entry-point MESSAGING
+     //already knows that the victim should be saved					
+      not (exists( VictimToSave($sender==victim)))
+    then
+	 $me.getLogger().info("Received help message from: "+$sender+", at location "+$location);
+	 // send I am going to help you
+	 SimpleTasksFactory.sendMessage($me,$sender,new IAmGoingToHelpYou($uuid));
+	 // Add victim to save
+	 insert(new VictimToSave( (RobotAgent)$sender ));
+	 delete($mr);
+end
+
+rule "Order save victim"
+    when
+       $me	: LeaderRobot( $teamMembers : teamMembers )
+       //subordinate is free
+       $vts: VictimToSave  ( $victim : victim)
+       not (exists( VictimAssignedToSubordinate($victim==victim)))
+       $subordinate : SubordinateRobot( idle ==true ) from $teamMembers
+    then
+	   //Send task: Save victim
+	   String uuid=UUID.randomUUID().toString();
+	   SimpleTasksFactory.sendMessage($me,$subordinate,new SaveVictim($victim,uuid));
+	   insert(new VictimAssignedToSubordinate($victim));
+end
+
+rule "Receive notification about victim saved"
+    when
+       $me	: LeaderRobot()
+       $mr	: MessageReceived(
+							data instanceof VictimSaved,
+							sender instanceof RobotAgent,
+							$victim : data.info
+     						) from entry-point MESSAGING
+     						
+     	$vts : VictimToSave  ( victim == $victim)
+     	$vas : VictimAssignedToSubordinate(victim == $victim)
+    then
+	   //Send task: Save victim
+	   delete($mr);
+	   delete($vas);
+	   delete($vts);
+end
+
+
+
+
+
+
+
+
+
